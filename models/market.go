@@ -1,5 +1,10 @@
 package models
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 type Ticker struct {
 	InstType  string `json:"instType"`
 	InstID    string `json:"instId"`
@@ -37,15 +42,46 @@ type OrderBook struct {
 }
 
 type Candle struct {
-	TS       string `json:"ts"`
-	O        string `json:"o"`
-	H        string `json:"h"`
-	L        string `json:"l"`
-	C        string `json:"c"`
-	Vol      string `json:"vol"`
-	VolCcy   string `json:"volCcy"`
+	TS          string `json:"ts"`
+	O           string `json:"o"`
+	H           string `json:"h"`
+	L           string `json:"l"`
+	C           string `json:"c"`
+	Vol         string `json:"vol"`
+	VolCcy      string `json:"volCcy"`
 	VolCcyQuote string `json:"volCcyQuote"`
-	Confirm  string `json:"confirm"`
+	Confirm     string `json:"confirm"`
+}
+
+func (c *Candle) UnmarshalJSON(data []byte) error {
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err != nil {
+		return err
+	}
+	if len(arr) < 5 {
+		return fmt.Errorf("okx: unexpected candle length %d", len(arr))
+	}
+	c.TS, c.O, c.H, c.L, c.C = arr[0], arr[1], arr[2], arr[3], arr[4]
+	switch len(arr) {
+	case 6:
+		// index- и mark-price-свечи: [ts, o, h, l, c, confirm]
+		c.Confirm = arr[5]
+	default:
+		// market-свечи: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+		if len(arr) > 5 {
+			c.Vol = arr[5]
+		}
+		if len(arr) > 6 {
+			c.VolCcy = arr[6]
+		}
+		if len(arr) > 7 {
+			c.VolCcyQuote = arr[7]
+		}
+		if len(arr) > 8 {
+			c.Confirm = arr[8]
+		}
+	}
+	return nil
 }
 
 type Trade struct {
@@ -89,11 +125,11 @@ type IndexComponent struct {
 }
 
 type BlockTicker struct {
-	InstID  string `json:"instId"`
-	InstType string `json:"instType"`
-	Vol24h  string `json:"vol24h"`
+	InstID    string `json:"instId"`
+	InstType  string `json:"instType"`
+	Vol24h    string `json:"vol24h"`
 	VolCcy24h string `json:"volCcy24h"`
-	TS      string `json:"ts"`
+	TS        string `json:"ts"`
 }
 
 type BlockTrade struct {
