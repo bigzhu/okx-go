@@ -1,6 +1,6 @@
 # okx-go
 
-![OKX Golang client](https://i.postimg.cc/Rh3kyD66/561657912-aa6baa0a-566e-4ac3-b1df-a495edaf1328.jpg)
+![OKX Golang client](https://i.postimg.cc/kG35Y9dL/okx-api-golang.jpg)
 
 [![Go Version](https://img.shields.io/badge/go-1.21+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
