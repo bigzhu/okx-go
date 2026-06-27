@@ -1,18 +1,20 @@
 package models
 
+import "encoding/json"
+
 type WSRequest struct {
 	Op   string                   `json:"op"`
 	Args []map[string]interface{} `json:"args"`
 }
 
 type WSResponse struct {
-	Event   string                   `json:"event,omitempty"`
-	Code    string                   `json:"code,omitempty"`
-	Msg     string                   `json:"msg,omitempty"`
-	ConnID  string                   `json:"connId,omitempty"`
-	Op      string                   `json:"op,omitempty"`
-	Data    []map[string]interface{} `json:"data,omitempty"`
-	Arg     map[string]interface{}   `json:"arg,omitempty"`
+	Event  string                 `json:"event,omitempty"`
+	Code   string                 `json:"code,omitempty"`
+	Msg    string                 `json:"msg,omitempty"`
+	ConnID string                 `json:"connId,omitempty"`
+	Op     string                 `json:"op,omitempty"`
+	Data   json.RawMessage        `json:"data,omitempty"`
+	Arg    map[string]interface{} `json:"arg,omitempty"`
 }
 
 type WSLoginRequest struct {
