@@ -41,18 +41,28 @@ type WSClient struct {
 	isDemo     bool
 	logger     Logger
 
-	mu            sync.RWMutex
-	subscriptions map[string]*wsSubscription
-	reconnectCbs  []func()
-	done          chan struct{}
-	reconnect     bool
-	authenticated bool
+	mu             sync.RWMutex
+	subscriptions  map[string]*wsSubscription
+	reconnectCbs   []func()
+	loginResult    chan error
+	done           chan struct{}
+	reconnect      bool
+	loginRequested bool
+	authenticated  bool
+	closed         bool
 }
 
 type wsSubscription struct {
 	channel string
 	args    map[string]interface{}
 	ch      chan []byte
+	ack     chan error
+}
+
+type wsSubscriptionSnapshot struct {
+	key     string
+	channel string
+	args    map[string]interface{}
 }
 
 type WSOption func(*WSClient)
@@ -89,6 +99,13 @@ func NewWSClient(apiKey, secretKey, passphrase, url string, opts ...WSOption) *W
 }
 
 func (ws *WSClient) Connect(ctx context.Context) error {
+	ws.mu.RLock()
+	closed := ws.closed
+	ws.mu.RUnlock()
+	if closed {
+		return errors.New("WebSocket client is closed")
+	}
+
 	dialer := websocket.DefaultDialer
 	conn, _, err := dialer.DialContext(ctx, ws.url, nil)
 	if err != nil {
@@ -96,6 +113,11 @@ func (ws *WSClient) Connect(ctx context.Context) error {
 	}
 
 	ws.mu.Lock()
+	if ws.closed {
+		ws.mu.Unlock()
+		_ = conn.Close()
+		return errors.New("WebSocket client is closed")
+	}
 	ws.conn = conn
 	ws.mu.Unlock()
 
@@ -108,8 +130,15 @@ func (ws *WSClient) Connect(ctx context.Context) error {
 }
 
 func (ws *WSClient) Login(ctx context.Context) error {
+	result := make(chan error, 1)
 	ws.mu.Lock()
+	if ws.loginResult != nil {
+		ws.mu.Unlock()
+		return errors.New("WebSocket login already in progress")
+	}
 	ws.authenticated = false
+	ws.loginRequested = true
+	ws.loginResult = result
 	ws.mu.Unlock()
 
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
@@ -131,24 +160,20 @@ func (ws *WSClient) Login(ctx context.Context) error {
 	}
 
 	if err := ws.send(loginReq); err != nil {
+		ws.clearLoginResult(result)
 		return fmt.Errorf("failed to send login request: %w", err)
 	}
 
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("login confirmation timeout: %w", ctx.Err())
-		case <-ticker.C:
-			ws.mu.RLock()
-			authenticated := ws.authenticated
-			ws.mu.RUnlock()
-			if authenticated {
-				ws.logger.Info("WebSocket authenticated")
-				return nil
-			}
+	select {
+	case err := <-result:
+		if err != nil {
+			return err
 		}
+		ws.logger.Info("WebSocket authenticated")
+		return nil
+	case <-ctx.Done():
+		ws.clearLoginResult(result)
+		return fmt.Errorf("login confirmation timeout: %w", ctx.Err())
 	}
 }
 
@@ -179,10 +204,12 @@ func (ws *WSClient) Subscribe(ctx context.Context, channel string, args map[stri
 	}
 
 	ch := make(chan []byte, 100)
+	ack := make(chan error, 1)
 	ws.subscriptions[subKey] = &wsSubscription{
 		channel: channel,
 		args:    cloneWSArgs(args),
 		ch:      ch,
+		ack:     ack,
 	}
 	ws.mu.Unlock()
 
@@ -192,11 +219,13 @@ func (ws *WSClient) Subscribe(ctx context.Context, channel string, args map[stri
 	}
 
 	if err := ws.send(subReq); err != nil {
-		ws.mu.Lock()
-		delete(ws.subscriptions, subKey)
-		close(ch)
-		ws.mu.Unlock()
+		ws.removeSubscription(subKey)
 		return nil, fmt.Errorf("failed to send subscribe request: %w", err)
+	}
+
+	if err := ws.waitSubscription(ctx, subKey, ack); err != nil {
+		ws.removeSubscription(subKey)
+		return nil, err
 	}
 
 	ws.logger.Info("Subscribed to channel", "channel", channel, "args", args)
@@ -231,6 +260,100 @@ func (ws *WSClient) Unsubscribe(channel string, args map[string]interface{}) err
 	return nil
 }
 
+func (ws *WSClient) waitSubscription(ctx context.Context, subKey string, ack chan error) error {
+	select {
+	case err := <-ack:
+		if err != nil {
+			return err
+		}
+		ws.clearSubscriptionAck(subKey, ack)
+		return nil
+	case <-ctx.Done():
+		ws.clearSubscriptionAck(subKey, ack)
+		return fmt.Errorf("subscription confirmation timeout for %s: %w", subKey, ctx.Err())
+	}
+}
+
+func (ws *WSClient) removeSubscription(subKey string) {
+	ws.mu.Lock()
+	sub, exists := ws.subscriptions[subKey]
+	if exists {
+		delete(ws.subscriptions, subKey)
+	}
+	ws.mu.Unlock()
+	if exists {
+		close(sub.ch)
+	}
+}
+
+func (ws *WSClient) clearSubscriptionAck(subKey string, ack chan error) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	sub, exists := ws.subscriptions[subKey]
+	if exists && sub.ack == ack {
+		sub.ack = nil
+	}
+}
+
+func (ws *WSClient) completeSubscription(channel string, arg map[string]interface{}, err error) {
+	subKey := ws.makeSubKeyFromArg(channel, arg)
+	ws.mu.Lock()
+	sub, exists := ws.subscriptions[subKey]
+	var ack chan error
+	if exists {
+		ack = sub.ack
+		sub.ack = nil
+	}
+	ws.mu.Unlock()
+	if !exists {
+		ws.logger.Error("No subscription waiting for confirmation", "channel", channel, "arg", arg)
+		return
+	}
+	if ack == nil {
+		return
+	}
+	select {
+	case ack <- err:
+	default:
+	}
+}
+
+func (ws *WSClient) clearLoginResult(result chan error) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if ws.loginResult == result {
+		ws.loginResult = nil
+	}
+}
+
+func (ws *WSClient) completeLogin(err error) {
+	ws.mu.Lock()
+	ws.authenticated = err == nil
+	result := ws.loginResult
+	ws.loginResult = nil
+	ws.mu.Unlock()
+	if result == nil {
+		return
+	}
+	select {
+	case result <- err:
+	default:
+	}
+}
+
+func (ws *WSClient) hasPendingLogin() bool {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return ws.loginResult != nil
+}
+
+func (ws *WSClient) eventError(event, code, msg string) error {
+	if code == "" && msg == "" {
+		return fmt.Errorf("WebSocket %s failed", event)
+	}
+	return fmt.Errorf("WebSocket %s failed: code=%s msg=%s", event, code, msg)
+}
+
 func (ws *WSClient) SubscribeReconnect(cb func()) {
 	if cb == nil {
 		return
@@ -243,20 +366,40 @@ func (ws *WSClient) SubscribeReconnect(cb func()) {
 func (ws *WSClient) Close() error {
 	ws.mu.Lock()
 	ws.reconnect = false
-	ws.mu.Unlock()
-
-	close(ws.done)
-
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
+	if !ws.closed {
+		close(ws.done)
+		ws.closed = true
+	}
+	closeErr := errors.New("WebSocket closed")
+	loginResult := ws.loginResult
+	ws.loginResult = nil
+	acks := make([]chan error, 0, len(ws.subscriptions))
 	for _, sub := range ws.subscriptions {
+		if sub.ack != nil {
+			acks = append(acks, sub.ack)
+			sub.ack = nil
+		}
 		close(sub.ch)
 	}
 	ws.subscriptions = make(map[string]*wsSubscription)
+	conn := ws.conn
+	ws.conn = nil
+	ws.mu.Unlock()
 
-	if ws.conn != nil {
-		return ws.conn.Close()
+	if loginResult != nil {
+		select {
+		case loginResult <- closeErr:
+		default:
+		}
+	}
+	for _, ack := range acks {
+		select {
+		case ack <- closeErr:
+		default:
+		}
+	}
+	if conn != nil {
+		return conn.Close()
 	}
 
 	return nil
@@ -365,26 +508,46 @@ func (ws *WSClient) handleMessage(message []byte) {
 	}
 
 	if resp.Event == "error" {
+		err := ws.eventError(resp.Event, resp.Code, resp.Msg)
 		ws.logger.Error("WebSocket error event", "code", resp.Code, "msg", resp.Msg)
+		if resp.Arg != nil {
+			if channel, ok := resp.Arg["channel"].(string); ok {
+				ws.completeSubscription(channel, resp.Arg, err)
+				return
+			}
+		}
+		if ws.hasPendingLogin() {
+			ws.completeLogin(err)
+		}
 		return
 	}
 
 	if resp.Event == "login" {
 		if resp.Code == "0" {
-			ws.mu.Lock()
-			ws.authenticated = true
-			ws.mu.Unlock()
+			ws.completeLogin(nil)
 			ws.logger.Info("Login successful")
 		} else {
-			ws.mu.Lock()
-			ws.authenticated = false
-			ws.mu.Unlock()
+			ws.completeLogin(ws.eventError(resp.Event, resp.Code, resp.Msg))
 			ws.logger.Error("Login failed", "code", resp.Code, "msg", resp.Msg)
 		}
 		return
 	}
 
-	if resp.Event == "subscribe" || resp.Event == "unsubscribe" {
+	if resp.Event == "subscribe" {
+		if resp.Arg != nil {
+			if channel, ok := resp.Arg["channel"].(string); ok {
+				var err error
+				if resp.Code != "" && resp.Code != "0" {
+					err = ws.eventError(resp.Event, resp.Code, resp.Msg)
+				}
+				ws.completeSubscription(channel, resp.Arg, err)
+			}
+		}
+		ws.logger.Debug("Subscription event", "event", resp.Event, "arg", resp.Arg)
+		return
+	}
+
+	if resp.Event == "unsubscribe" {
 		ws.logger.Debug("Subscription event", "event", resp.Event, "arg", resp.Arg)
 		return
 	}
@@ -439,8 +602,7 @@ func (ws *WSClient) handleReconnect() {
 			continue
 		}
 
-		wasAuthenticated := ws.isAuthenticated()
-		if wasAuthenticated {
+		if ws.needsLogin() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := ws.Login(ctx); err != nil {
 				ws.logger.Error("Re-authentication failed", "error", err)
@@ -450,14 +612,17 @@ func (ws *WSClient) handleReconnect() {
 			cancel()
 		}
 
-		if err := ws.resubscribe(); err != nil {
+		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+		if err := ws.resubscribe(ctx); err != nil {
 			ws.logger.Error("Resubscribe failed", "error", err)
+			cancel()
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff
 			}
 			continue
 		}
+		cancel()
 
 		ws.invokeReconnectCallbacks()
 		ws.logger.Info("Reconnected successfully")
@@ -465,17 +630,18 @@ func (ws *WSClient) handleReconnect() {
 	}
 }
 
-func (ws *WSClient) isAuthenticated() bool {
+func (ws *WSClient) needsLogin() bool {
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
-	return ws.authenticated
+	return ws.loginRequested
 }
 
-func (ws *WSClient) resubscribe() error {
+func (ws *WSClient) resubscribe(ctx context.Context) error {
 	ws.mu.RLock()
-	subs := make([]*wsSubscription, 0, len(ws.subscriptions))
+	subs := make([]wsSubscriptionSnapshot, 0, len(ws.subscriptions))
 	for _, sub := range ws.subscriptions {
-		subs = append(subs, &wsSubscription{
+		subs = append(subs, wsSubscriptionSnapshot{
+			key:     ws.makeSubKey(sub.channel, sub.args),
 			channel: sub.channel,
 			args:    cloneWSArgs(sub.args),
 		})
@@ -483,12 +649,26 @@ func (ws *WSClient) resubscribe() error {
 	ws.mu.RUnlock()
 
 	for _, sub := range subs {
+		ack := make(chan error, 1)
+		ws.mu.Lock()
+		current, exists := ws.subscriptions[sub.key]
+		if !exists {
+			ws.mu.Unlock()
+			return fmt.Errorf("subscription disappeared before resubscribe: %s", sub.key)
+		}
+		current.ack = ack
+		ws.mu.Unlock()
+
 		req := models.WSSubscribeRequest{
 			Op:   "subscribe",
 			Args: []map[string]interface{}{ws.subscribeArgs(sub.channel, sub.args)},
 		}
 		if err := ws.send(req); err != nil {
+			ws.clearSubscriptionAck(sub.key, ack)
 			return fmt.Errorf("failed to resubscribe %s: %w", sub.channel, err)
+		}
+		if err := ws.waitSubscription(ctx, sub.key, ack); err != nil {
+			return fmt.Errorf("failed to confirm resubscribe %s: %w", sub.channel, err)
 		}
 		ws.logger.Info("Resubscribed to channel", "channel", sub.channel, "args", sub.args)
 	}
