@@ -43,6 +43,7 @@ type WSClient struct {
 
 	mu            sync.RWMutex
 	subscriptions map[string]*wsSubscription
+	reconnectCbs  []func()
 	done          chan struct{}
 	reconnect     bool
 	authenticated bool
@@ -228,6 +229,15 @@ func (ws *WSClient) Unsubscribe(channel string, args map[string]interface{}) err
 	ws.logger.Info("Unsubscribed from channel", "channel", channel, "args", args)
 
 	return nil
+}
+
+func (ws *WSClient) SubscribeReconnect(cb func()) {
+	if cb == nil {
+		return
+	}
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.reconnectCbs = append(ws.reconnectCbs, cb)
 }
 
 func (ws *WSClient) Close() error {
@@ -449,6 +459,7 @@ func (ws *WSClient) handleReconnect() {
 			continue
 		}
 
+		ws.invokeReconnectCallbacks()
 		ws.logger.Info("Reconnected successfully")
 		return
 	}
@@ -482,6 +493,15 @@ func (ws *WSClient) resubscribe() error {
 		ws.logger.Info("Resubscribed to channel", "channel", sub.channel, "args", sub.args)
 	}
 	return nil
+}
+
+func (ws *WSClient) invokeReconnectCallbacks() {
+	ws.mu.RLock()
+	callbacks := append([]func(){}, ws.reconnectCbs...)
+	ws.mu.RUnlock()
+	for _, cb := range callbacks {
+		go cb()
+	}
 }
 
 func (ws *WSClient) makeSubKey(channel string, args map[string]interface{}) string {
