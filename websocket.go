@@ -396,43 +396,19 @@ func (ws *WSClient) handleMessage(message []byte) {
 			return
 		}
 
-		ws.deliverMessage(channel, resp.Arg, message)
-	}
-}
+		subKey := ws.makeSubKeyFromArg(channel, resp.Arg)
 
-func (ws *WSClient) deliverMessage(channel string, arg map[string]interface{}, message []byte) {
-	subKey := ws.makeSubKeyFromArg(channel, arg)
+		ws.mu.RLock()
+		sub, exists := ws.subscriptions[subKey]
+		ws.mu.RUnlock()
 
-	ws.mu.RLock()
-	sub, exists := ws.subscriptions[subKey]
-	ws.mu.RUnlock()
-	if exists {
-		ws.deliverToSubscription(channel, sub, message)
-		return
-	}
-
-	ws.mu.RLock()
-	channelSubs := make([]*wsSubscription, 0)
-	for _, sub := range ws.subscriptions {
-		if sub.channel == channel {
-			channelSubs = append(channelSubs, sub)
+		if exists {
+			select {
+			case sub.ch <- message:
+			default:
+				ws.logger.Warn("Channel buffer full, dropping message", "channel", channel)
+			}
 		}
-	}
-	ws.mu.RUnlock()
-	if len(channelSubs) == 0 {
-		ws.logger.Warn("No subscription for message", "channel", channel, "arg", arg)
-		return
-	}
-	for _, sub := range channelSubs {
-		ws.deliverToSubscription(channel, sub, message)
-	}
-}
-
-func (ws *WSClient) deliverToSubscription(channel string, sub *wsSubscription, message []byte) {
-	select {
-	case sub.ch <- message:
-	default:
-		ws.logger.Warn("Channel buffer full, dropping message", "channel", channel)
 	}
 }
 
