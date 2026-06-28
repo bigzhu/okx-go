@@ -381,7 +381,7 @@ func (c *Client) GetBillsHistory(ctx context.Context, instType *string, ccy *str
 	}
 
 	var result []models.Bill
-	if err := c.doFunc(ctx, http.MethodGet, "/api/v5/account/bills-history", params, nil, &result); err != nil {
+	if err := c.doFunc(ctx, http.MethodGet, "/api/v5/account/bills-archive", params, nil, &result); err != nil {
 		return nil, err
 	}
 	return result, nil

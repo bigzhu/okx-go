@@ -220,7 +220,7 @@ func (c *Client) GetSavingBalance(ctx context.Context, ccy *string) ([]models.Sa
 	}
 
 	var result []models.SavingBalance
-	if err := c.doFunc(ctx, http.MethodGet, "/api/v5/asset/saving-balance", params, nil, &result); err != nil {
+	if err := c.doFunc(ctx, http.MethodGet, "/api/v5/finance/savings/balance", params, nil, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -228,7 +228,7 @@ func (c *Client) GetSavingBalance(ctx context.Context, ccy *string) ([]models.Sa
 
 func (c *Client) PurchaseRedempt(ctx context.Context, req models.PurchaseRedemptRequest) ([]models.PurchaseRedemptResponse, error) {
 	var result []models.PurchaseRedemptResponse
-	if err := c.doFunc(ctx, http.MethodPost, "/api/v5/asset/purchase-redempt", nil, req, &result); err != nil {
+	if err := c.doFunc(ctx, http.MethodPost, "/api/v5/finance/savings/purchase-redempt", nil, req, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -241,7 +241,7 @@ func (c *Client) SetLendingRate(ctx context.Context, ccy string, rate string) ([
 	}
 
 	var result []models.LendingRate
-	if err := c.doFunc(ctx, http.MethodPost, "/api/v5/asset/set-lending-rate", nil, body, &result); err != nil {
+	if err := c.doFunc(ctx, http.MethodPost, "/api/v5/finance/savings/set-lending-rate", nil, body, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -254,7 +254,7 @@ func (c *Client) GetLendingRateSummary(ctx context.Context, ccy *string) ([]mode
 	}
 
 	var result []models.LendingRate
-	if err := c.doFunc(ctx, http.MethodGet, "/api/v5/asset/lending-rate-summary", params, nil, &result); err != nil {
+	if err := c.doFunc(ctx, http.MethodGet, "/api/v5/finance/savings/lending-rate-summary", params, nil, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -276,7 +276,7 @@ func (c *Client) GetLendingRateHistory(ctx context.Context, ccy *string, after *
 	}
 
 	var result []models.LendingRate
-	if err := c.doFunc(ctx, http.MethodGet, "/api/v5/asset/lending-rate-history", params, nil, &result); err != nil {
+	if err := c.doFunc(ctx, http.MethodGet, "/api/v5/finance/savings/lending-rate-history", params, nil, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
